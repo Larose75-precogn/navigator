@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>4.100 Navigator</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+      /* ============================================================
+         STYLES PRECOGN DARK
+         ============================================================ */
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        font-family: 'Roboto Mono', monospace;
+        background: #0B0F10;
+        color: #D8FFE5;
+        padding: 20px;
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: flex-start;
+      }
+      .container {
+        max-width: 420px;
+        width: 100%;
+        margin: 0 auto;
+        background: #0B0F10;
+        border-radius: 8px;
+        padding: 20px;
+      }
+      .header {
+        border-bottom: 1px solid #21442D;
+        padding-bottom: 14px;
+        margin-bottom: 20px;
+      }
+      .header .title {
+        font-size: 18px;
+        font-weight: 600;
+        color: #00FF66;
+        letter-spacing: 1px;
+      }
+      .header .title .icon { color: #00FF66; }
+      .header .subtitle {
+        color: #7AAE92;
+        font-size: 11px;
+        margin-top: 2px;
+      }
+      .header .sheet-name {
+        color: #21442D;
+        font-size: 10px;
+        margin-top: 4px;
+      }
+      .metric {
+        padding: 10px 12px;
+        border-left: 2px solid #21442D;
+        margin-bottom: 4px;
+        cursor: pointer;
+        transition: all 0.2s;
+        border-radius: 2px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .metric:hover {
+        background: #11181C;
+        border-left-color: #00FF66;
+      }
+      .metric .label { color: #7AAE92; font-size: 13px; }
+      .metric .value { color: #D8FFE5; font-weight: 400; }
+      .metric .value .count { 
+        background: rgba(0, 255, 102, 0.08);
+        padding: 2px 10px;
+        border-radius: 12px;
+        font-size: 12px;
+      }
+      .actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 4px;
+      }
+      .actions .btn {
+        flex: 1;
+        min-width: 100px;
+        padding: 8px 12px;
+        background: transparent;
+        border: 1px solid #21442D;
+        border-radius: 4px;
+        color: #D8FFE5;
+        font-family: 'Roboto Mono', monospace;
+        font-size: 11px;
+        cursor: pointer;
+        transition: all 0.2s;
+        text-align: center;
+      }
+      .actions .btn:hover {
+        background: #00FF66;
+        color: #0B0F10;
+        border-color: #00FF66;
+      }
+      .actions .btn.primary { border-color: #00FF66; color: #00FF66; }
+      .actions .btn.primary:hover { background: #00FF66; color: #0B0F10; }
+      .actions .btn.fusion { border-color: #FFB300; color: #FFB300; }
+      .actions .btn.fusion:hover { background: #FFB300; color: #0B0F10; }
+      .actions .btn.llm { border-color: #7B61FF; color: #7B61FF; }
+      .actions .btn.llm:hover { background: #7B61FF; color: #0B0F10; }
+      .footer {
+        margin-top: 16px;
+        padding-top: 12px;
+        border-top: 1px solid #21442D;
+        display: flex;
+        justify-content: space-between;
+        font-size: 9px;
+        color: #21442D;
+      }
+      .status {
+        padding: 8px 12px;
+        margin: 12px 0 0 0;
+        border-radius: 4px;
+        font-size: 11px;
+        display: none;
+        text-align: center;
+      }
+      .status.success { display: block; border: 1px solid #00FF66; color: #00FF66; }
+      .status.error { display: block; border: 1px solid #FF5555; color: #FF5555; }
+      .status.info { display: block; border: 1px solid #21442D; color: #7AAE92; }
+      .status .spinner {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border: 2px solid rgba(0, 255, 102, 0.1);
+        border-top-color: #00FF66;
+        border-radius: 50%;
+        animation: spin 0.6s linear infinite;
+        margin-right: 6px;
+        vertical-align: middle;
+      }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ============================================================
+     1000 - HEADER
+     ============================================================ -->
+    <div class="container">
+      <div class="header">
+        <div class="title"><span class="icon">◈</span> 4.100 Navigator</div>
+        <div class="subtitle">PreCogn · Gestion Centralisée</div>
+        <div class="sheet-name" id="sheetName">📊 Sheet: <span id="sheetNameValue">-</span></div>
+        <div class="sheet-name" id="sheetIdDisplay" style="color:#21442D;font-size:9px;margin-top:2px;">ID: <span id="sheetIdValue">-</span></div>
+      </div>
+      
+      <!-- ============================================================
+       2000 - METRICS
+       ============================================================ -->
+      <div id="metricsContainer">
+        <div class="metric" onclick="showSheets()">
+          <span class="label">📄 Sheets</span>
+          <span class="value"><span class="count" id="sheetCount">-</span></span>
+        </div>
+        <div class="metric" onclick="showObjects()">
+          <span class="label">📦 Objets</span>
+          <span class="value"><span class="count" id="objectCount">-</span></span>
+        </div>
+        <div class="metric" onclick="showRules()">
+          <span class="label">⚖️ Règles</span>
+          <span class="value"><span class="count" id="ruleCount">-</span></span>
+        </div>
+        <div class="metric" onclick="showFlows()">
+          <span class="label">🌊 Flows</span>
+          <span class="value"><span class="count" id="flowCount">-</span></span>
+        </div>
+        <div class="metric" onclick="showDependencies()">
+          <span class="label">🔗 Dépendances</span>
+          <span class="value"><span class="count" id="depCount">-</span></span>
+        </div>
+      </div>
+
+      <!-- ============================================================
+       2500 - CHAT LLM
+       ============================================================ -->
+      <div id="llmContainer" style="display:none; margin-top:16px;">
+        <div style="margin-bottom:8px;color:#7AAE92;font-size:11px;">
+          💡 Posez une question à PreCogn sur votre organisation
+        </div>
+        <textarea id="llmQuestion" rows="3" style="width:100%;padding:8px;background:#11181C;border:1px solid #21442D;border-radius:4px;color:#D8FFE5;font-family:'Roboto Mono',monospace;font-size:12px;resize:vertical;" placeholder="Ex: Quelles sont les incohérences dans mon organisation ?"></textarea>
+        <button class="btn primary" onclick="askLLM()" style="width:100%;margin-top:8px;">💬 Envoyer</button>
+        <div id="llmResponse" style="margin-top:8px;padding:8px;border-left:2px solid #00FF66;font-size:12px;color:#7AAE92;min-height:20px;"></div>
+      </div>
+
+      <!-- ============================================================
+       3000 - ACTIONS
+       ============================================================ -->
+      <div class="actions">
+        <button class="btn primary" onclick="refreshData()">🔄 Rafraîchir</button>
+        <button class="btn fusion" onclick="openFusion()">🔄 Fusion (4.1.1.1)</button>
+        <button class="btn llm" onclick="toggleLLM()">🧠 LLM (4.002)</button>
+      </div>
+      
+      <!-- ============================================================
+       4000 - STATUS
+       ============================================================ -->
+      <div id="status" class="status"></div>
+      
+      <!-- ============================================================
+       5000 - FOOTER
+       ============================================================ -->
+      <div class="footer">
+        <span>© 2026 PreCogn · v4.0</span>
+        <span id="footerTime">-</span>
+      </div>
+    </div>
+
+    <!-- ============================================================
+     6000 - JAVASCRIPT
+     ============================================================ -->
+    <script>
+      // ============================================================
+      // 6000 10 - CONFIGURATION
+      // ============================================================
+      
+      const NAVIGATOR_URL = window.location.href.split('?')[0];
+      const LLM_URL = 'https://precogn-llm-backend.splaissy.workers.dev';
+      
+      // ============================================================
+      // 6000 20 - RÉCUPÉRATION DU CONTEXTE
+      // ============================================================
+      
+      function getContext() {
+        try {
+          const params = new URLSearchParams(window.location.search);
+          const sheetId = params.get('sheetId') || params.get('id') || '';
+          const sheetName = params.get('sheetName') || params.get('name') || 'Inconnu';
+          return { sheetId, sheetName };
+        } catch (e) {
+          console.error('getContext - Erreur:', e);
+          return { sheetId: '', sheetName: 'Inconnu' };
+        }
+      }
+      
+      const context = getContext();
+      document.getElementById('sheetNameValue').textContent = context.sheetName;
+      document.getElementById('sheetIdValue').textContent = context.sheetId || 'Aucun';
+      document.getElementById('footerTime').textContent = new Date().toLocaleTimeString();
+      
+      console.log('Navigator - Context:', context);
+      
+      // ============================================================
+      // 6000 30 - AFFICHAGE DU STATUT
+      // ============================================================
+      
+      function showStatus(type, message) {
+        const el = document.getElementById('status');
+        el.className = 'status ' + type;
+        el.textContent = message;
+        console.log('Status [' + type + ']:', message);
+      }
+      
+      // ============================================================
+      // 6000 40 - CHARGEMENT DES MÉTRIQUES
+      // ============================================================
+      
+      function loadMetrics() {
+        console.log('loadMetrics - Début');
+        showStatus('info', '⏳ Chargement...');
+        
+        if (!context.sheetId) {
+          showStatus('error', '❌ Aucun sheetId fourni dans l\'URL');
+          console.error('loadMetrics - sheetId manquant');
+          return;
+        }
+        
+        google.script.run
+          .withSuccessHandler(function(metrics) {
+            console.log('loadMetrics - Succès:', metrics);
+            if (metrics.error) {
+              showStatus('error', '❌ ' + metrics.error);
+              return;
+            }
+            document.getElementById('sheetCount').textContent = metrics.sheets || 0;
+            document.getElementById('objectCount').textContent = metrics.objects || 0;
+            document.getElementById('ruleCount').textContent = metrics.rules || 0;
+            document.getElementById('flowCount').textContent = metrics.flows || 0;
+            document.getElementById('depCount').textContent = metrics.dependencies || 0;
+            showStatus('success', '✅ Données chargées (' + new Date().toLocaleTimeString() + ')');
+          })
+          .withFailureHandler(function(err) {
+            console.error('loadMetrics - Erreur:', err);
+            showStatus('error', '❌ ' + err.message);
+          })
+          .collectMetrics(context.sheetId);
+      }
+      
+      function refreshData() {
+        console.log('refreshData - Rafraîchissement manuel');
+        loadMetrics();
+      }
+      
+      // ============================================================
+      // 6000 50 - OUVERTURE DES DÉTAILS (modaux)
+      // ============================================================
+
+      function callServer(functionName, param) {
+        console.log('callServer -', functionName, param || '');
+        google.script.run
+          .withSuccessHandler(function(html) {
+            console.log('callServer - Succès:', functionName);
+            showModal(html);
+          })
+          .withFailureHandler(function(err) {
+            console.error('callServer - Erreur:', functionName, err);
+            showStatus('error', '❌ ' + err.message);
+          })
+          [functionName](param || context.sheetId);
+      }
+
+      function showSheets() { callServer('getSheetsDetailHTML'); }
+      function showObjects() { callServer('getObjectsDetailHTML'); }
+      function showRules() { callServer('getRulesDetailHTML'); }
+      function showFlows() { callServer('getFlowsDetailHTML'); }
+      function showDependencies() { callServer('getDependenciesDetailHTML'); }
+
+      // ============================================================
+      // 6000 55 - LLM INTEGRATION
+      // ============================================================
+
+      function toggleLLM() {
+        console.log('toggleLLM - Début');
+        const container = document.getElementById('llmContainer');
+        if (!container) {
+          console.error('toggleLLM - llmContainer introuvable');
+          return;
+        }
+        const isHidden = container.style.display === 'none';
+        container.style.display = isHidden ? 'block' : 'none';
+        console.log('toggleLLM - Affichage:', container.style.display);
+        if (isHidden) {
+          const input = document.getElementById('llmQuestion');
+          if (input) input.focus();
+        }
+      }
+
+      function askLLM() {
+        console.log('askLLM - Début');
+        
+        const questionInput = document.getElementById('llmQuestion');
+        if (!questionInput) {
+          console.error('askLLM - llmQuestion introuvable');
+          showStatus('error', '❌ Erreur interne');
+          return;
+        }
+        
+        const question = questionInput.value.trim();
+        console.log('askLLM - Question:', question);
+        
+        if (!question) {
+          showStatus('error', '❌ Veuillez poser une question.');
+          return;
+        }
+        
+        const responseDiv = document.getElementById('llmResponse');
+        if (!responseDiv) {
+          console.error('askLLM - llmResponse introuvable');
+          return;
+        }
+        
+        responseDiv.innerHTML = '<span class="spinner"></span> Réflexion en cours...';
+        showStatus('info', '⏳ Interrogation du LLM...');
+        
+        const payload = {
+          question: question,
+          organizationId: context.sheetId,
+          context: {
+            connector: 'google-sheets',
+            sourceId: context.sheetId
+          }
+        };
+        
+        console.log('askLLM - Payload:', JSON.stringify(payload));
+        
+        fetch('https://precogn-llm-backend.splaissy.workers.dev/chat', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        })
+        .then(function(response) {
+          console.log('askLLM - Réponse HTTP:', response.status);
+          if (!response.ok) {
+            throw new Error('Erreur HTTP: ' + response.status);
+          }
+          return response.json();
+        })
+        .then(function(data) {
+          console.log('askLLM - Données reçues:', data);
+          if (data.reponse) {
+            responseDiv.innerHTML = '🤖 ' + data.reponse;
+            showStatus('success', '✅ Réponse reçue');
+          } else if (data.error) {
+            responseDiv.innerHTML = '❌ ' + data.error;
+            showStatus('error', '❌ ' + data.error);
+          } else {
+            responseDiv.innerHTML = '❌ Réponse inattendue';
+            showStatus('error', '❌ Réponse inattendue');
+          }
+        })
+        .catch(function(err) {
+          console.error('askLLM - Erreur:', err);
+          responseDiv.innerHTML = '❌ Erreur: ' + err.message;
+          showStatus('error', '❌ ' + err.message);
+        });
+      }
+
+      // ============================================================
+      // 6000 60 - AFFICHAGE MODAL
+      // ============================================================
+
+      function showModal(html) {
+        const d = document.createElement('div');
+        d.innerHTML = html;
+        document.body.appendChild(d);
+        console.log('showModal - Modal affichée');
+      }
+
+      // ============================================================
+      // 6000 70 - INITIALISATION
+      // ============================================================
+
+      window.onload = function() {
+        console.log('init - Sidebar chargée');
+        console.log('init - Context:', context);
+        loadMetrics();
+        setInterval(loadMetrics, 60000);
+      };
+    </script>
+  </body>
+</html>
