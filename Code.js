@@ -62,8 +62,12 @@
  */
 
 const VERSION = '6.1.0';
-const APP_NAME = '◈ Structory OS';
+const APP_NAME = '◈ Structory';
 const COMMUNICATOR_URL = "https://script.google.com/macros/s/AKfycbwCCLsBtsZ0kreKs9VKhVwD2E7in2w2Ov0NyCD-So7dJ9jVTgxdjUpLU6AHtwSGyFXUaQ/exec";
+// Seule(s) org(s) volontairement publiques (démo prospect, aucune donnée réelle) — toute
+// autre org exige désormais une vraie session (voir authGate) avant de rendre quoi que ce
+// soit. Ne JAMAIS y ajouter smcspl ou une future org cliente réelle.
+const PUBLIC_DEMO_ORG_IDS = ['smcdemo', 'structory_demo'];
 
 // ================================================================
 // MODULE "MON COMPTE" (widget Bibliotheque.AccountPanel, subscriptions_api) — relais requis car
@@ -154,6 +158,7 @@ function doGet(e) {
     const result = Bibliotheque.identityEnsureSecretPlaceholder(orgId, folderId, name);
     return ContentService.createTextOutput(JSON.stringify(result)).setMimeType(ContentService.MimeType.JSON);
   }
+
 
   // Rattrapage ponctuel d'une brique Rule connector manquante (2026-07-29 — voir
   // identityEnsureConnectorRule, ConnectorIdentity.js) : depuis cette date, toute liaison
@@ -278,14 +283,46 @@ function doGet(e) {
     // 1. Résoudre le contexte
     const context = resolveContext(e);
     Logger.log('Context: ' + JSON.stringify(context));
-    
+
+    // 1bis. Gate d'accès réel (2026-08-08, retour de Stéphane : "construit enfin le chantier
+    // login") — tant que ce n'est pas une org publique volontaire (PUBLIC_DEMO_ORG_IDS), plus
+    // aucune donnée réelle n'est calculée/rendue sans session valide + appartenance vérifiée.
+    const gate = authGate(e, context.orgId, context);
+    if (gate) return gate;
+
     // 2. Récupérer l'organisation (via OrganizationService)
     const org = getOrganization(context);
     if (!org) {
       return HtmlService.createHtmlOutput(getErrorHTML('Organisation introuvable pour ce contexte.'));
     }
     Logger.log('Organisation: ' + org.id + ' - ' + org.name);
-    
+
+    // 2bis. Téléchargement direct du journal .ledger — retour de Stéphane 2026-08-11, "je dois
+    // pouvoir télécharger le journal facilement". Placé APRÈS authGate/getOrganization : même
+    // protection d'accès que la page elle-même, pas de route parallèle non protégée.
+    if (e && e.parameter && e.parameter.download === 'journal') {
+      const printResult = Bibliotheque.ledgerQuery(org.id, 'print', []);
+      const content = (printResult && printResult.success)
+        ? printResult.output
+        : ('; Erreur export : ' + (printResult && printResult.error));
+      // MimeType.CSV déclenche côté Google un routage automatique vers "ouvrir avec Sheets"
+      // depuis une URL script.google.com/.../exec, qui échoue avec "cette action n'est valide
+      // que pour les produits actuellement installés" (retour de Stéphane 2026-08-13) — le
+      // contenu n'est de toute façon pas un vrai CSV (format ledger-cli en texte brut). TEXT
+      // n'est associé à aucun "produit" Google, donc pas de routage, juste le texte servi tel quel.
+      return ContentService.createTextOutput(content).setMimeType(ContentService.MimeType.TEXT);
+    }
+
+    // 2ter. Export FEC — section Flux (retour de Stéphane 2026-08-13). Même gate d'accès,
+    // même raison pour MimeType.TEXT plutôt que CSV (voir commentaire ci-dessus).
+    if (e && e.parameter && e.parameter.download === 'fec') {
+      const fecResult = Bibliotheque.ledgerExportFec(org.id);
+      const fecContent = (fecResult && fecResult.success)
+        ? fecResult.fec
+        : ('; Erreur export FEC : ' + (fecResult && fecResult.error));
+      return ContentService.createTextOutput(fecContent).setMimeType(ContentService.MimeType.TEXT);
+    }
+
     // 3. Charger le patrimoine (via Storage)
     const patrimoine = getPatrimoine(org.id);
     Logger.log('Patrimoine: objets=' + (patrimoine.objects ? patrimoine.objects.length : 0));
@@ -298,13 +335,138 @@ function doGet(e) {
     const html = getNavigatorHTML(org, patrimoine, evolutions, context);
     
     return HtmlService.createHtmlOutput(html)
-      .setTitle('Structory OS - ' + org.name)
+      .setTitle('Structory - ' + org.name)
       .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
       
   } catch (error) {
     Logger.log('doGet - Erreur: ' + error.message);
     return HtmlService.createHtmlOutput(getErrorHTML(error));
   }
+}
+
+// ============================================================
+// 1500 AUTH GATE — connexion réelle par lien magique (2026-08-08)
+// ============================================================
+// Un webapp Apps Script executeAs=USER_DEPLOYING ne voit JAMAIS l'identité Google du visiteur
+// (Session.getActiveUser() renvoie toujours le déployeur) — la seule identité fiable possible
+// est celle que subscriptions_api connaît déjà (users/orgs/memberships), prouvée par un lien
+// magique envoyé par email puis une session gardée côté navigateur (localStorage, jamais un
+// cookie — Apps Script ne peut pas en poser). Retourne un HtmlOutput à renvoyer TEL QUEL si
+// l'accès doit être bloqué/redirigé, ou null si le rendu normal peut continuer.
+function authGate(e, orgId, context) {
+  const params = (e && e.parameter) || {};
+
+  if (!orgId || PUBLIC_DEMO_ORG_IDS.indexOf(orgId) !== -1) return null;
+
+  // Retour du lien magique cliqué dans l'email : échange le jeton contre une vraie session,
+  // puis rend la page réelle DANS LE MÊME chargement (2026-08-11, bug réel corrigé : la page-
+  // relais intermédiaire — "Continuer" → 2e navigation plein écran vers le même déploiement —
+  // laissait le pont RPC google.script.run de la page finale mort, silencieusement, tous les
+  // boutons du Navigator restant inertes alors que le Communicator embarqué, chargé lui NORMALEMENT
+  // via <iframe src>, fonctionnait toujours. Un seul chargement de page = un seul pont RPC, comme
+  // partout ailleurs dans l'appli. La session est quand même stockée côté navigateur, juste par un
+  // script inline dans CETTE MÊME page plutôt que par une page-relais séparée — voir getNavigatorHTML.
+  if (params.loginToken) {
+    try {
+      const consumed = Bibliotheque.authConsumeLoginToken(params.loginToken);
+      if (!consumed || !consumed.success) {
+        return HtmlService.createHtmlOutput(getLoginScreenHTML(orgId, 'Ce lien a déjà été utilisé ou a expiré (15 min). Redemandes-en un ci-dessous.'));
+      }
+      const membership = Bibliotheque.authCheckMembership(orgId, consumed.uid);
+      if (!membership || !membership.success || !membership.isMember) {
+        return HtmlService.createHtmlOutput(getAccessDeniedHTML(orgId, consumed.email));
+      }
+      if (context) {
+        context.verifiedUid = consumed.uid;
+        context.verifiedEmail = consumed.email;
+        context.verifiedRole = membership.role;
+        context.sessionTokenToStore = consumed.sessionToken;
+      }
+      return null; // rendu normal en dessous, DANS ce même chargement de page.
+    } catch (err) {
+      return HtmlService.createHtmlOutput(getLoginScreenHTML(orgId, 'Service de connexion indisponible pour le moment, réessaie dans un instant.'));
+    }
+  }
+
+  const sessionToken = params.s;
+  if (!sessionToken) {
+    return HtmlService.createHtmlOutput(getLoginScreenHTML(orgId, null));
+  }
+
+  try {
+    const session = Bibliotheque.authGetSession(sessionToken);
+    if (!session || !session.success) {
+      return HtmlService.createHtmlOutput(getLoginScreenHTML(orgId, 'Session expirée, reconnecte-toi.'));
+    }
+    const membership = Bibliotheque.authCheckMembership(orgId, session.uid);
+    if (!membership || !membership.success || !membership.isMember) {
+      return HtmlService.createHtmlOutput(getAccessDeniedHTML(orgId, session.email));
+    }
+    // Identité déjà prouvée ICI (session + appartenance réelle) — transmise au reste du rendu
+    // (OrgPanel) par mutation de `context` plutôt que revérifiée une 2e fois avec une logique
+    // différente et moins fiable (2026-08-11, bug réel : le rond "?" affichait un point bleu
+    // neutre au lieu du ✓ vert propriétaire alors que la connexion venait de réussir).
+    if (context) {
+      context.verifiedUid = session.uid;
+      context.verifiedEmail = session.email;
+      context.verifiedRole = membership.role;
+    }
+    return null; // session valide + membre de cette org précise : rendu normal en dessous.
+  } catch (err) {
+    // Fail CLOSED, jamais ouvert : si subscriptions_api est injoignable, on ne peut PAS
+    // prouver le droit d'accès, donc on ne rend jamais les données réelles.
+    return HtmlService.createHtmlOutput(getLoginScreenHTML(orgId, 'Service de connexion indisponible pour le moment, réessaie dans un instant.'));
+  }
+}
+
+// L'envoi du lien de connexion se fait depuis org-onboarding (executeAs=USER_ACCESSING), JAMAIS
+// depuis Navigator (executeAs=USER_DEPLOYING, donc MailApp enverrait toujours sous l'identité
+// de Stéphane) — retour explicite de Stéphane, 2026-08-10 : "en BYOS on doit utiliser le
+// paramétrage de l'organisation... c'est lui qui s'envoie un mail, lui qui se connecte". Chaque
+// visiteur autorise MailApp sous SON PROPRE compte Google, une seule fois, comme pour Drive déjà
+// (voir org-onboarding/CLAUDE.md) — jamais Stéphane qui autoriserait au nom de tout le monde.
+const ORG_ONBOARDING_URL = "https://script.google.com/macros/s/AKfycbw8hhBqSBl4elLaV4a3nVTRVFGp4mmwRSCuguk1U4Fi1U4aN4Em4qvnLxWbp9t7L_j-/exec";
+
+function getLoginScreenHTML(orgId, message) {
+  const loginUrl = ORG_ONBOARDING_URL + '?screen=login&orgId=' + encodeURIComponent(orgId);
+  return '<!DOCTYPE html><html><head><meta charset="UTF-8">'
+    + '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+    + '<title>Structory - Connexion</title>'
+    + '<link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@300;400;600&display=swap" rel="stylesheet">'
+    + '<style>* { margin:0; padding:0; box-sizing:border-box; } '
+    + 'body { font-family:"Roboto Mono", monospace; background:#0B0F10; color:#D8FFE5; min-height:100vh; '
+    + 'display:flex; align-items:center; justify-content:center; padding:24px; } '
+    + '.wrap { max-width:380px; width:100%; } '
+    + '.app-name { font-size:13px; color:#f59e0b; letter-spacing:2px; margin-bottom:8px; } '
+    + 'h1 { font-size:20px; font-weight:300; margin-bottom:6px; } '
+    + '.sub { font-size:12px; color:#7AAE92; margin-bottom:20px; line-height:1.4; } '
+    + 'a.btn { display:block; text-align:center; width:100%; padding:12px; border-radius:8px; border:1px solid #f59e0b; '
+    + 'background:#f59e0b; color:#0B0F10; font-family:"Roboto Mono", monospace; font-size:14px; font-weight:600; '
+    + 'text-decoration:none; box-sizing:border-box; } '
+    + '.msg { font-size:12px; margin-top:10px; min-height:14px; } '
+    + '.msg.warn { color:#f59e0b; }</style>'
+    + '</head><body><div class="wrap">'
+    + '<div class="app-name">◈ STRUCTORY</div>'
+    + '<h1>Connexion</h1>'
+    + '<div class="sub">"' + _escAttr(orgId) + '" est une organisation réelle — connecte-toi pour y accéder.</div>'
+    + (message ? '<div class="msg warn">' + _escAttr(message) + '</div>' : '')
+    + '<a class="btn" href="' + loginUrl + '" target="_top">Se connecter</a>'
+    + '</div></body></html>';
+}
+
+function getAccessDeniedHTML(orgId, email) {
+  return '<!DOCTYPE html><html><head><meta charset="UTF-8">'
+    + '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+    + '<title>Structory - Accès refusé</title>'
+    + '<style>body { font-family:monospace; background:#0B0F10; color:#D8FFE5; min-height:100vh; '
+    + 'display:flex; align-items:center; justify-content:center; padding:24px; text-align:center; } '
+    + '.wrap { max-width:380px; } h1 { font-size:18px; margin-bottom:10px; color:#f87171; } '
+    + 'p { font-size:13px; color:#7AAE92; line-height:1.5; } '
+    + 'a { color:#f59e0b; }</style></head><body><div class="wrap">'
+    + '<h1>Accès refusé</h1>'
+    + '<p>' + _escAttr(email || 'Ce compte') + ' n\'a pas accès à l\'organisation "' + _escAttr(orgId) + '".</p>'
+    + '<p style="margin-top:14px;"><a href="' + ScriptApp.getService().getUrl() + '">← Retour</a></p>'
+    + '</div></body></html>';
 }
 
 // 1000 20 - getNavigatorHTML()
@@ -346,6 +508,14 @@ function getNavigatorHTML(org, patrimoine, evolutions, context) {
   // nécessaire) et renvoyable à la demande en plus de l'envoi automatique quotidien (7h,
   // smc-daily-report.timer). "Archiver" reste un objectif futur, pas construit ici.
   const reportUrl = ScriptApp.getService().getUrl() + '?orgId=' + encodeURIComponent(orgId) + '&view=report';
+  // Journal complet, jamais tronqué (2026-08-13, retour de Stéphane : "je veux qu'on puisse en
+  // permanence dans tous les projets Structory avoir accès au journal qui est la pierre angulaire
+  // du système... en entier pas des morceaux") — même route que le téléchargement (voir doGet,
+  // ?download=journal, protégée par authGate comme le reste de la page), rendue visible en
+  // permanence ici plutôt que cachée derrière une seule commande de chat qui, elle, reste
+  // volontairement tronquée à 25 lignes pour la lisibilité (voir Communicator/Code.js::quickJournal,
+  // qui pointe maintenant vers CE lien pour la vue complète).
+  const journalUrl = ScriptApp.getService().getUrl() + '?orgId=' + encodeURIComponent(orgId) + '&download=journal';
   const outputsSectionHtml = comptesData ? `
   <div class="section" style="padding:0;overflow:hidden;">
     <div class="section-title" style="padding:12px 16px 0;">📤 Outputs</div>
@@ -354,6 +524,7 @@ function getNavigatorHTML(org, patrimoine, evolutions, context) {
       <span onclick="toggleReportScheduleForm()" class="pm-output-link" style="font-size:12px;padding:4px 10px;margin-bottom:4px;">⚙️ Configurer la fréquence d'envoi</span>
       <div id="report-schedule-form" style="display:none;width:100%;padding:8px 10px;"></div>
       <a href="${reportUrl}" target="_blank" class="pm-output-link">🖨️ Imprimer / PDF</a>
+      <a href="${journalUrl}" target="_blank" class="pm-output-link">📥 Télécharger le journal complet</a>
       <span onclick="renvoyerEmailMaintenant()" class="pm-output-link">📧 Renvoyer l'email maintenant</span>
       <span id="output-email-status" style="font-size:11px;color:#7AAE92;padding:2px 10px;"></span>
     </div>
@@ -361,7 +532,7 @@ function getNavigatorHTML(org, patrimoine, evolutions, context) {
   ` : '';
   const modulesMenu = getModulesMenu(orgId, comptesData);
   const contextInfo = getContextInfo(context);
-  const orgPanelHtml = Bibliotheque.getOrgPanelHtml(orgId);
+  const orgPanelHtml = Bibliotheque.getOrgPanelHtml(orgId, context.verifiedRole || null, context.verifiedEmail || null);
   // "Flow visible" (2026-07-31, retour de Stéphane : "au lieu de masquer les traitements, tu
   // les rends visibles" — voir precogn.org/test, Objects/Flows/Time/Rules). Composant partagé,
   // statique (pas de variable de template), inclus une seule fois — voir PrecognFlow dans le
@@ -375,7 +546,7 @@ function getNavigatorHTML(org, patrimoine, evolutions, context) {
   <base target="_top">
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Structory OS - ${org.name}</title>
+  <title>Structory - ${org.name}</title>
   <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@300;400;600&display=swap" rel="stylesheet">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -523,6 +694,61 @@ function getNavigatorHTML(org, patrimoine, evolutions, context) {
     }
     .item.inconsistency {
       border-left-color: #FF5555;
+    }
+    /* Section Objets (carré bleu) — groupes PCG + détail de compte au clic (2026-08-13) */
+    .brick-dot {
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      margin-right: 6px;
+      border-radius: 2px;
+      vertical-align: middle;
+    }
+    .brick-object { background: #4285F4; }
+    .brick-flow { background: #ffffff; border: 1px solid #21442D; }
+    .brick-rule {
+      display: inline-block;
+      width: 0; height: 0;
+      margin-right: 6px;
+      vertical-align: middle;
+      border-left: 5px solid transparent;
+      border-right: 5px solid transparent;
+      border-bottom: 9px solid #FF4444;
+    }
+    .brick-time {
+      display: inline-block;
+      width: 8px; height: 8px;
+      margin-right: 6px;
+      vertical-align: middle;
+      background: #CCFF00;
+      transform: rotate(45deg);
+    }
+    #time-date-input {
+      background: #11181C;
+      color: #D8FFE5;
+      border: 1px solid #21442D;
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-family: inherit;
+      font-size: 13px;
+    }
+    .obj-group-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #4285F4;
+      margin: 12px 0 4px;
+      padding-left: 4px;
+    }
+    .obj-group-label:first-child { margin-top: 0; }
+    .obj-detail {
+      padding: 8px 12px 10px 20px;
+      font-size: 11px;
+      color: #7AAE92;
+      white-space: pre-wrap;
+      font-family: 'Roboto Mono', monospace;
+      border-left: 2px solid #21442D;
+      margin: -2px 0 4px;
     }
     .item.inconsistency .item-type {
       color: #FF5555;
@@ -758,6 +984,12 @@ function getNavigatorHTML(org, patrimoine, evolutions, context) {
   </style>
 </head>
 <body>
+${context.sessionTokenToStore ? (
+  // `location` ici est celle de l'iframe sandboxé Google, PAS l'URL réelle du navigateur
+  // (piège déjà documenté ailleurs dans ce fichier) — impossible de nettoyer le loginToken
+  // visible dans la barre d'adresse depuis ce script, seul le stockage de session compte ici.
+  '<script>try { localStorage.setItem("structory_session", ' + JSON.stringify(context.sessionTokenToStore) + '); } catch (e) {}</script>'
+) : ''}
 ${orgPanelHtml}
 ${flowWidgetHtml}
 <div class="precogn-split">
@@ -795,7 +1027,7 @@ ${flowWidgetHtml}
   <div id="pm-time-panel" class="pm-time-panel"></div>
 
   <div class="footer">
-    <span>© Structory OS</span>
+    <span>© Structory</span>
     <span>${new Date().toLocaleString()}</span>
   </div>
 </div>
@@ -828,6 +1060,37 @@ ${communicatorColumnHtml}
   const IS_DEMO_ORG = (ORG_ID === 'smcdemo');
   const DEMO_BADGE_HTML = '<span style="font-size:9px;color:#0B0F10;background:#FFB84D;padding:1px 6px;border-radius:8px;margin-left:6px;font-weight:600;vertical-align:middle;">DEMO</span>';
   const EB_PENDING = ${JSON.stringify(context.ebPending || '')};
+
+  // ============================================================
+  // OBJETS (carré bleu) — détail d'un compte au clic, accordéon inline (2026-08-13, retour de
+  // Stéphane : la liste des comptes doit être une vraie surface consultable dans Navigator, pas
+  // une réponse de chat). Chargé une seule fois par compte (dataset.loaded), pas de re-fetch au
+  // second clic — juste un repli/dépli.
+  // ============================================================
+  function toggleAccountDetail(rowEl, compte, detailId) {
+    const detailEl = document.getElementById(detailId);
+    if (!detailEl) return;
+    if (detailEl.style.display !== 'none') { detailEl.style.display = 'none'; return; }
+    detailEl.style.display = 'block';
+    if (detailEl.dataset.loaded === '1') return;
+    detailEl.textContent = 'Chargement…';
+    // Sentinelles __balance__/__grandlivre__ (section Flux, rond blanc) : mêmes accordéons que
+    // les comptes (section Objets), mais une autre commande côté serveur.
+    const runner = compte === '__balance__' ? 'getFlowBalance'
+      : compte === '__grandlivre__' ? 'getFlowGrandLivre'
+      : 'getAccountDetail';
+    const call = google.script.run
+      .withSuccessHandler(function (text) {
+        detailEl.textContent = text;
+        detailEl.dataset.loaded = '1';
+      })
+      .withFailureHandler(function (err) {
+        detailEl.textContent = '❌ Erreur : ' + err.message;
+      });
+    if (runner === 'getAccountDetail') call.getAccountDetail(ORG_ID, compte);
+    else if (runner === 'getFlowBalance') call.getFlowBalance(ORG_ID);
+    else call.getFlowGrandLivre(ORG_ID);
+  }
 
   // ============================================================
   // VUE PATRIMOINE — style application bancaire (2026-07-26)
@@ -2238,7 +2501,7 @@ ${communicatorColumnHtml}
         if (!res || !res.success || !res.name) return;
         const el = document.getElementById('nav-org-name');
         if (el) el.textContent = res.name;
-        document.title = 'Structory OS - ' + res.name;
+        document.title = 'Structory - ' + res.name;
       })
       .identityGetOrgProfile(ORG_ID);
   }
@@ -2366,10 +2629,24 @@ ${communicatorColumnHtml}
           + '</div>'
           + '<div id="powens-attach-status-' + a.id + '" style="font-size:11px;min-height:14px;"></div>'
           + '</div>';
-      }).join('');
+      }).join('')
+      // Échappatoire manquante (2026-08-07, retour de Stéphane : "les comptes indy ne sont pas
+      // automatisés car identifiants différents") — la réutilisation de connexion existante
+      // (ci-dessus, 2026-08-06) suppose qu'un même nom de banque = mêmes identifiants, faux pour
+      // Indy (une connexion Swan/Indy séparée par SCI, identifiants différents par entité) : le
+      // parcours n'offrait alors AUCUN moyen de forcer une vraie nouvelle authentification,
+      // seulement les comptes déjà trouvés. Toujours proposer explicitement l'alternative.
+      + '<div style="margin-top:10px;padding-top:10px;border-top:1px solid #21442D;">'
+      + '<span onclick="forcerNouvelleConnexionPowens()" class="pm-output-link" style="font-size:12px;">'
+      + '🔑 Aucun de ces comptes ? Se connecter avec d&#8217;autres identifiants&#8230;</span></div>';
     panel.style.display = 'block';
     document.getElementById('compte-panel-overlay').style.display = 'block';
     _renderCompletedFlowHeader('pcf-header-powens', 'powens');
+  }
+
+  function forcerNouvelleConnexionPowens() {
+    closeComptePanel();
+    _demarrerWebviewPowens(document.getElementById('automatiser-flow'));
   }
 
   function creerComptePuisPowens(accountId, bankName) {
@@ -2577,8 +2854,26 @@ ${communicatorColumnHtml}
   // Exposer les fonctions globalement
   window.openLLMChat = openLLMChat;
   window.askLLM = askLLM;
-  
+
   console.log('Navigator - LLM Chat chargé');
+
+  // ============================================================
+  // TIME (losange jaune) — voir renderTimeSection/getEntriesNearDate côté serveur.
+  // ============================================================
+  function onTimeDateChange() {
+    const input = document.getElementById('time-date-input');
+    const detailEl = document.getElementById('time-detail');
+    if (!input || !detailEl) return;
+    detailEl.textContent = 'Chargement…';
+    google.script.run
+      .withSuccessHandler(function (text) { detailEl.textContent = text; })
+      .withFailureHandler(function (err) { detailEl.textContent = '❌ Erreur : ' + err.message; })
+      .getEntriesNearDate(ORG_ID, input.value);
+  }
+  window.onTimeDateChange = onTimeDateChange;
+  // Chargement initial (date du jour) — sans attendre un premier clic (retour de Stéphane :
+  // "on affichera en embedding les éléments écriture les plus proches").
+  if (document.getElementById('time-date-input')) onTimeDateChange();
 </script>
 
 </body>
@@ -2592,7 +2887,7 @@ function getErrorHTML(error) {
   return `
 <!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>Structory OS - Erreur</title>
+<head><meta charset="UTF-8"><title>Structory - Erreur</title>
 <style>
   body { background: #0B0F10; color: #D8FFE5; font-family: 'Roboto Mono', monospace; padding: 40px; }
   h1 { color: #FF5555; font-weight: 300; }
@@ -2600,7 +2895,7 @@ function getErrorHTML(error) {
 </style>
 </head>
 <body>
-  <h1>❌ Erreur Structory OS</h1>
+  <h1>❌ Erreur Structory</h1>
   <div class="error">${msg}</div>
 </body>
 </html>
@@ -2671,7 +2966,7 @@ function getOrganization(context) {
     // bloquant pour l'affichage initial.
     return { id: orgId, name: orgId, description: 'Organisation PreCogn' };
   }
-  return { id: 'demo', name: 'Structory OS — Demo', description: 'Passez ?orgId= dans l\'URL pour accéder à votre organisation.' };
+  return { id: 'demo', name: 'Structory Demo', description: 'Passez ?orgId= dans l\'URL pour accéder à votre organisation.' };
 }
 
 // ============================================================
@@ -2692,6 +2987,340 @@ function getStructoryData(orgId) {
   }
 }
 
+// Mêmes regroupements que Communicator/Code.js::OBJECTS_GROUPES et
+// structory-demo-addon/Code.js::BALANCE_GROUPES — cohérence entre les trois surfaces sur ce
+// qu'est un "groupe" de comptes (2026-08-08, retour de Stéphane : journal/comptes/rules
+// permanents et réels dans Navigator, au lieu du dump de balance brut + Rules de démo).
+const NAV_PCG_GROUPES = [
+  { label: 'Capitaux propres', prefix: '1' },
+  { label: 'Immobilisations',  prefix: '2' },
+  { label: 'Stocks',           prefix: '3' },
+  { label: 'Clients',          prefix: '411' },
+  { label: 'Fournisseurs',     prefix: '401' },
+  { label: 'TVA',              prefix: '445' },
+  { label: 'Autres tiers',     prefix: '42|43|44' },
+  { label: 'Trésorerie',       prefix: '51' },
+  { label: 'Charges',          prefix: '6' },
+  { label: 'Produits',         prefix: '7' },
+];
+
+function _navMatchGroupe(compte) {
+  const specific = NAV_PCG_GROUPES.filter(function (g) { return g.prefix.length > 1 && g.prefix.indexOf('|') === -1; });
+  const alt = NAV_PCG_GROUPES.filter(function (g) { return g.prefix.indexOf('|') !== -1; });
+  const generic = NAV_PCG_GROUPES.filter(function (g) { return g.prefix.length === 1; });
+  for (const g of specific.concat(alt, generic)) {
+    const alts = g.prefix.split('|');
+    for (const p of alts) {
+      if (compte.indexOf(p) === 0) return g.label;
+    }
+  }
+  return 'Autres';
+}
+
+/**
+ * Vrais comptes PCG utilisés dans le journal, groupés — remplace la fausse section "Objets"
+ * (getTestPatrimoine) pour toute org dotée d'un vrai journal ledger-cli.
+ */
+function getStructoryAccounts(orgId) {
+  try {
+    const result = Bibliotheque.ledgerQuery(orgId, 'accounts', []);
+    if (!result.success) return [];
+    return (result.output || '').split('\n').map(function (l) { return l.trim(); }).filter(Boolean)
+      .map(function (compte) { return { name: compte, type: _navMatchGroupe(compte) }; });
+  } catch (e) {
+    Logger.log('getStructoryAccounts error: ' + e.message);
+    return [];
+  }
+}
+
+/**
+ * Détail réel d'un compte : mouvements (ledger register filtré), pas un dump texte du journal
+ * entier. Retour de Stéphane 2026-08-13 : la section Objets doit permettre de voir le détail
+ * d'un compte au clic. Les 15 dernières lignes seulement (register affiche déjà en ordre
+ * chronologique croissant, donc les plus récentes sont en bas — tail() est le bon sens).
+ */
+function getAccountDetail(orgId, compte) {
+  try {
+    const result = Bibliotheque.ledgerQuery(orgId, 'register', [compte]);
+    if (!result || !result.success) return '❌ Erreur : ' + ((result && result.error) || 'inconnue');
+    const lines = (result.output || '').split('\n').filter(function (l) { return l.trim(); });
+    if (!lines.length) return 'Aucun mouvement sur ce compte.';
+    const maxLines = 15;
+    if (lines.length <= maxLines) return lines.join('\n');
+    const hidden = lines.length - maxLines;
+    return '… (' + hidden + ' ligne' + (hidden > 1 ? 's' : '') + ' précédente' + (hidden > 1 ? 's' : '') + ' masquée' + (hidden > 1 ? 's' : '') + ')\n'
+      + lines.slice(-maxLines).join('\n');
+  } catch (e) {
+    return '❌ Erreur : ' + e.message;
+  }
+}
+
+/**
+ * Section Objets (carré bleu #4285F4) — comptes réels groupés par catégorie PCG (NAV_PCG_GROUPES),
+ * chaque compte cliquable pour voir son détail (getAccountDetail, chargé à la demande). Remplace
+ * l'ancienne liste plate (renderSection) qui n'affichait qu'un badge de groupe par ligne, sans
+ * regroupement visuel ni détail — retour de Stéphane 2026-08-13 : "un espace dédié suffisamment
+ * vaste, ux et bien organisé" pour la consultation, plutôt que 57 boutons dans le Communicator.
+ */
+function renderObjectsSection(objects) {
+  const header = '<div class="section-title"><span><span class="brick-dot brick-object"></span>Objets — Comptes PCG</span>'
+    + '<span class="count">' + (objects ? objects.length : 0) + '</span></div>';
+
+  if (!objects || !objects.length) {
+    return '<div class="section">' + header + '<div class="empty">Aucun compte</div></div>';
+  }
+
+  const groupOrder = NAV_PCG_GROUPES.map(function (g) { return g.label; }).concat(['Autres']);
+  const byGroup = {};
+  objects.forEach(function (o) { (byGroup[o.type] = byGroup[o.type] || []).push(o); });
+
+  let bodyHtml = '';
+  groupOrder.forEach(function (label) {
+    const comptes = byGroup[label];
+    if (!comptes || !comptes.length) return;
+    bodyHtml += '<div class="obj-group-label">' + label + '</div>';
+    comptes.forEach(function (c) {
+      const detailId = 'obj-detail-' + c.name.replace(/[^a-zA-Z0-9]/g, '_');
+      // _escAttr() (pas JSON.stringify brut) : un JSON.stringify() insère ses propres guillemets
+      // doubles, qui casseraient l'attribut onclick="..." lui-même déjà délimité par des
+      // guillemets doubles — bug réel trouvé en vérifiant la page vraiment servie (2026-08-13).
+      bodyHtml += '<div class="item" onclick="toggleAccountDetail(this,' + _escAttr(JSON.stringify(c.name)) + ',' + _escAttr(JSON.stringify(detailId)) + ')">'
+        + '<span>' + _escAttr(c.name) + '</span><span class="item-type">détail ▸</span></div>'
+        + '<div class="obj-detail" id="' + _escAttr(detailId) + '" style="display:none;"></div>';
+    });
+  });
+
+  return '<div class="section">' + header + bodyHtml + '</div>';
+}
+
+// ================================================================
+// FLUX (rond blanc) — actions réelles ledger-cli, chacune sa propre commande, jamais un dump
+// générique. Retour de Stéphane 2026-08-13 : saisie/consultation/export organisés en un espace
+// dédié plutôt qu'en boutons épars dans le Communicator.
+// ================================================================
+
+/** Balance complète — même commande que Communicator::quickBalance, formatée pour Navigator. */
+function getFlowBalance(orgId) {
+  const result = Bibliotheque.ledgerQuery(orgId, 'balance', []);
+  if (!result || !result.success) return '❌ Erreur : ' + ((result && result.error) || 'inconnue');
+  return (result.output || '').trim() || 'Aucune donnée.';
+}
+
+/**
+ * Grand livre : contrairement au Journal (chronologique, déjà au centre de Navigator) ou à la
+ * Balance (soldes), le grand livre regroupe TOUS les mouvements PAR COMPTE — ledger-cli n'a pas
+ * de commande dédiée à ce regroupement, donc on le construit nous-mêmes en enchaînant un
+ * `register <compte>` réel par compte existant (mêmes comptes que la section Objets).
+ */
+function getFlowGrandLivre(orgId) {
+  const accounts = getStructoryAccounts(orgId);
+  if (!accounts.length) return 'Aucun compte.';
+  const blocks = accounts.map(function (a) {
+    const result = Bibliotheque.ledgerQuery(orgId, 'register', [a.name]);
+    const mouvements = (result && result.success) ? (result.output || '').trim() : '';
+    return '── ' + a.name + ' ──\n' + (mouvements || '(aucun mouvement)');
+  });
+  return blocks.join('\n\n');
+}
+
+/**
+ * Section Flux (rond blanc) — actions réelles, pas 57 boutons plats. "TVA"/"IS" annoncés mais
+ * pas encore construits (pas de backend derrière) : affichés grisés/non cliquables plutôt que
+ * de faire semblant — jamais de fausse action qui ne fait rien de réel.
+ */
+function renderFlowsSection(orgId) {
+  const header = '<div class="section-title"><span><span class="brick-dot brick-flow"></span>Flux — Actions</span></div>';
+
+  const downloadFecUrl = ScriptApp.getService().getUrl() + '?orgId=' + encodeURIComponent(orgId) + '&download=fec';
+
+  const rows = ''
+    + '<div class="item" style="cursor:default;">'
+    + '<span>✍️ Saisir une écriture</span><span class="item-type">dans le chat →</span></div>'
+    + '<div class="item" onclick="toggleAccountDetail(this,' + _escAttr(JSON.stringify('__balance__')) + ',' + _escAttr(JSON.stringify('flow-detail-balance')) + ')">'
+    + '<span>📊 Balance</span><span class="item-type">détail ▸</span></div>'
+    + '<div class="obj-detail" id="flow-detail-balance" style="display:none;"></div>'
+    + '<div class="item" onclick="toggleAccountDetail(this,' + _escAttr(JSON.stringify('__grandlivre__')) + ',' + _escAttr(JSON.stringify('flow-detail-grandlivre')) + ')">'
+    + '<span>📗 Grand livre</span><span class="item-type">détail ▸</span></div>'
+    + '<div class="obj-detail" id="flow-detail-grandlivre" style="display:none;"></div>'
+    + '<a class="item" href="' + downloadFecUrl + '" style="text-decoration:none;color:#D8FFE5;">'
+    + '<span>🧾 Export FEC</span><span class="item-type">télécharger ⬇</span></a>'
+    + '<div class="item" style="cursor:default;opacity:0.4;">'
+    + '<span>🧮 Gérer la TVA</span><span class="item-type">bientôt</span></div>'
+    + '<div class="item" style="cursor:default;opacity:0.4;">'
+    + '<span>🏛️ Gérer l\'IS</span><span class="item-type">bientôt</span></div>';
+
+  return '<div class="section">' + header + rows + '</div>';
+}
+
+/**
+ * Vraies Rules du module comptable de l'org (ledger_api/modules/{module}/bricks/) — remplace
+ * la fausse section "Règles" (getTestPatrimoine, "TVA 20%"/"Remise 5%" inventées).
+ */
+function getStructoryRules(orgId) {
+  try {
+    const result = Bibliotheque.analyzorGetRules(orgId);
+    if (!result.success) return [];
+    return (result.rules || []).map(function (r) {
+      return { name: r.title || r.id || 'Règle', type: (r.tags || []).slice(0, 2).join(', ') };
+    });
+  } catch (e) {
+    Logger.log('getStructoryRules error: ' + e.message);
+    return [];
+  }
+}
+
+/**
+ * Section Rule (triangle rouge) — le référentiel : vraies Rule bricks PCG de l'org, plus les
+ * commandes ledger-cli réellement câblées dans Navigator/Communicator (jamais une liste
+ * théorique complète de ledger-cli — seulement ce qui est effectivement exposé ici).
+ */
+function renderRulesSection(rules) {
+  const header = '<div class="section-title"><span><span class="brick-rule"></span>Rule — PCG &amp; commandes</span>'
+    + '<span class="count">' + (rules ? rules.length : 0) + '</span></div>';
+
+  let bodyHtml = (rules && rules.length)
+    ? rules.map(function (r) {
+        return '<div class="item"><span>' + _escAttr(r.name) + '</span><span class="item-type">' + _escAttr(r.type) + '</span></div>';
+      }).join('')
+    : '<div class="empty">Aucune règle</div>';
+
+  const commands = [
+    { cmd: 'balance', desc: 'soldes par compte' },
+    { cmd: 'register', desc: 'mouvements chronologiques' },
+    { cmd: 'accounts', desc: 'liste des comptes' },
+    { cmd: 'print', desc: 'journal au format ledger' },
+    { cmd: 'csv', desc: 'export CSV' }
+  ];
+  bodyHtml += '<div class="obj-group-label" style="color:#FF4444;">Commandes ledger-cli disponibles</div>';
+  bodyHtml += commands.map(function (c) {
+    return '<div class="item" style="cursor:default;"><span>' + c.cmd + '</span><span class="item-type">' + c.desc + '</span></div>';
+  }).join('');
+
+  return '<div class="section">' + header + bodyHtml + '</div>';
+}
+
+/**
+ * Journal chronologique structuré (date/libellé/compte/débit/crédit) — remplace le dump de
+ * balance brute en <pre> par un vrai tableau, permanent, lisible (retour de Stéphane
+ * 2026-08-08 : "que le journal soit visible en permanence"). Réutilise le même parsing CSV
+ * que structory-demo-addon/Code.js::_writeJournalTab.
+ */
+function getStructoryJournal(orgId) {
+  try {
+    const result = Bibliotheque.ledgerQuery(orgId, 'csv', []);
+    if (!result.success) return [];
+    const legs = [];
+    Utilities.parseCsv(result.output || '').forEach(function (cols) {
+      if (cols.length < 6) return;
+      const date = cols[0], libelle = cols[2], compte = cols[3], montantRaw = cols[5];
+      if (compte === '998' || compte === '999') return;
+      const montant = parseFloat(montantRaw);
+      if (isNaN(montant)) return;
+      legs.push({ date: date, libelle: libelle, compte: compte, montant: montant });
+    });
+
+    // Regroupe les jambes comptables consécutives d'une même écriture en une seule ligne
+    // date/libellé/compte débit/compte crédit — retour de Stéphane 2026-08-11 : "je ne dois
+    // pas avoir deux lignes à chaque fois avec le même libellé". `ledger csv` liste toujours
+    // les jambes d'une même écriture de façon consécutive (jamais entrelacées entre deux
+    // écritures), donc un simple changement de (date, libellé) marque une nouvelle écriture.
+    // Une écriture à plus de 2 jambes (ex. TVA collectée + TVA déductible + banque) affiche
+    // plusieurs comptes séparés par une virgule côté débit ou crédit.
+    const entries = [];
+    let current = null;
+    legs.forEach(function (leg) {
+      if (!current || current.date !== leg.date || current.libelle !== leg.libelle) {
+        current = { date: leg.date, libelle: leg.libelle, debits: [], credits: [], montant: 0 };
+        entries.push(current);
+      }
+      if (leg.montant >= 0) {
+        current.debits.push(leg.compte);
+        current.montant += leg.montant;
+      } else {
+        current.credits.push(leg.compte);
+      }
+    });
+    entries.forEach(function (e) {
+      e.compteDebit = e.debits.join(', ');
+      e.compteCredit = e.credits.join(', ');
+    });
+
+    // Tri explicite par date — retour de Stéphane 2026-08-11 : "même pas dans l'ordre
+    // chronologique". Cause réelle : le fichier .ledger n'est PAS trié globalement (chaque
+    // bloc de transactions générées — TVA, loyers, salaires... — est trié en interne, mais les
+    // blocs ne sont jamais fusionnés par date), et `ledger csv` réimprime dans l'ordre du
+    // fichier, pas un ordre chronologique global. Comparaison de chaînes "YYYY/MM/DD" = tri
+    // chronologique valide (format déjà zero-paddé).
+    entries.sort(function (a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); });
+    // Plus récent en premier (retour de Stéphane 2026-08-06, même convention que Communicator).
+    entries.reverse();
+    return entries;
+  } catch (e) {
+    Logger.log('getStructoryJournal error: ' + e.message);
+    return [];
+  }
+}
+
+// ================================================================
+// TIME (losange jaune) — naviguer dans les dates réelles du journal, pas une plage devinée.
+// Retour de Stéphane 2026-08-13 : "bouger les times en fonction des dates d'événements
+// survenues ou de la date choisie par le user", afficher en embed les écritures les plus proches.
+// ================================================================
+
+/**
+ * Écritures d'une date précise si elles existent, sinon les plus proches (avant/après) —
+ * jamais une plage arbitraire. Réutilise getStructoryJournal (déjà trié, déjà groupé par
+ * écriture) plutôt que de reparser le CSV une deuxième fois.
+ */
+function getEntriesNearDate(orgId, targetDateStr) {
+  const entries = getStructoryJournal(orgId);
+  if (!entries.length) return 'Aucune écriture dans ce journal.';
+
+  const target = new Date(targetDateStr);
+  if (isNaN(target.getTime())) return 'Date invalide.';
+
+  function toDate(e) {
+    const p = e.date.split(/[/-]/);
+    return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+  }
+  function dateFr(e) {
+    const p = e.date.split(/[/-]/);
+    return p.length === 3 ? p[2] + '/' + p[1] + '/' + p[0] : e.date;
+  }
+  function formatLine(e) {
+    return dateFr(e) + '  ' + e.libelle + '  (' + e.montant.toFixed(2) + '€)  ['
+      + e.compteDebit + ' → ' + e.compteCredit + ']';
+  }
+
+  const exact = entries.filter(function (e) {
+    const d = toDate(e);
+    return d.getFullYear() === target.getFullYear() && d.getMonth() === target.getMonth() && d.getDate() === target.getDate();
+  });
+
+  if (exact.length) {
+    return 'Écritures du ' + dateFr(exact[0]) + ' :\n' + exact.map(formatLine).join('\n');
+  }
+
+  const nearest = entries
+    .map(function (e) { return { e: e, diff: Math.abs(toDate(e).getTime() - target.getTime()) }; })
+    .sort(function (a, b) { return a.diff - b.diff; })
+    .slice(0, 5)
+    .map(function (x) { return x.e; });
+
+  return 'Aucune écriture exactement à cette date — les plus proches :\n' + nearest.map(formatLine).join('\n');
+}
+
+/** Section Time (losange jaune) — sélecteur de date + écritures les plus proches en embed. */
+function renderTimeSection() {
+  const todayIso = Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd');
+  const header = '<div class="section-title"><span><span class="brick-time"></span>Time — Naviguer dans les dates</span></div>';
+  const body = '<div style="padding:6px 12px;">'
+    + '<input type="date" id="time-date-input" value="' + todayIso + '" onchange="onTimeDateChange()">'
+    + '</div>'
+    + '<div class="obj-detail" id="time-detail" style="display:block;">Chargement…</div>';
+  return '<div class="section">' + header + body + '</div>';
+}
+
 // 3500 20 - renderStructorySection()
 function renderStructorySection(orgId, data) {
   const commUrl = COMMUNICATOR_URL + (orgId && orgId !== 'demo' ? '?orgId=' + encodeURIComponent(orgId) : '');
@@ -2707,14 +3336,57 @@ function renderStructorySection(orgId, data) {
       + '<a href="' + commUrl + '" target="_blank" style="color:#00FF66;text-decoration:none;">Créez-en un dans le Communicator →</a></div></div>';
   }
 
-  const balanceHtml = data.balance
-    ? '<pre style="font-size:11px;color:#7AAE92;white-space:pre-wrap;padding:8px 12px;border-left:2px solid #21442D;margin:4px 0;">' + data.balance + '</pre>'
-    : '<div class="empty">Balance indisponible</div>';
+  // Journal structuré (tableau réel, pas un dump texte) — retour de Stéphane 2026-08-08 :
+  // "que le journal soit visible en permanence". Remplace l'ancien <pre> de balance brute.
+  const entries = getStructoryJournal(orgId);
+  let journalHtml;
+  if (entries.length === 0) {
+    journalHtml = '<div class="empty">Aucune écriture</div>';
+  } else {
+    // Toutes les écritures affichées ici, dans la même page — retour de Stéphane 2026-08-11 :
+    // "je ne dois pas aller ailleurs et ouvrir une autre fenêtre". Plus de lien externe vers
+    // /api/ledger/journal (page HTML séparée, encore marquée "copropriété" — pas pertinente
+    // pour une démo Structory, corrigée par ailleurs mais de toute façon plus utilisée ici).
+    //
+    // Une ligne par ÉCRITURE (pas par jambe comptable) — retour de Stéphane 2026-08-11 : "je ne
+    // dois pas avoir deux lignes à chaque fois avec le même libellé". getStructoryJournal()
+    // regroupe déjà les jambes ; compteDebit/compteCredit peuvent lister plusieurs comptes
+    // séparés par une virgule pour les écritures à plus de 2 jambes (ex. TVA + banque).
+    const rowsHtml = entries.map(function (e) {
+      // Format français JJ/MM/AAAA (retour de Stéphane 2026-08-11) — le CSV ledger-cli sort en
+      // AAAA/MM/JJ, jamais le format attendu en France.
+      const dParts = e.date.split(/[/-]/);
+      const dateFr = dParts.length === 3 ? dParts[2] + '/' + dParts[1] + '/' + dParts[0] : e.date;
+      return '<tr>'
+        + '<td style="color:#7AAE92;white-space:nowrap;padding-right:12px;">' + dateFr + '</td>'
+        + '<td style="padding-right:12px;">' + e.libelle + '</td>'
+        + '<td style="color:#FF8080;padding-right:12px;">' + e.compteDebit + '</td>'
+        + '<td style="color:#00FF66;padding-right:12px;">' + e.compteCredit + '</td>'
+        + '<td style="text-align:right;">' + e.montant.toFixed(2) + '</td>'
+        + '</tr>';
+    }).join('');
+    journalHtml = '<table style="width:100%;font-size:11px;border-collapse:collapse;">'
+      + '<tr style="color:#7AAE92;text-align:left;border-bottom:1px solid #21442D;">'
+      + '<th style="padding-right:12px;">Date</th><th style="padding-right:12px;">Libellé</th>'
+      + '<th style="padding-right:12px;">Débit</th><th style="padding-right:12px;">Crédit</th>'
+      + '<th style="text-align:right;">Montant</th></tr>'
+      + rowsHtml + '</table>';
+  }
 
-  return '<div class="section">'
-    + '<div class="section-title">◈ Structory — Balance'
-    + ' <a href="' + commUrl + '" target="_blank" style="color:#00FF66;font-size:10px;text-decoration:none;font-weight:normal;">Communicator →</a></div>'
-    + balanceHtml + '</div>';
+  // Le lien "Communicator →" est retiré (retour de Stéphane 2026-08-11 : "le communicator est
+  // à droite déjà" — redondant dans la vue Navigator+Communicator côte à côte ; commUrl reste
+  // utilisé pour le cas "aucun journal" ci-dessus, seul endroit où il a du sens).
+  //
+  // Téléchargement direct (retour de Stéphane 2026-08-11 : "je dois pouvoir télécharger le
+  // journal facilement") — même gate d'accès que la page elle-même (voir doGet, branche
+  // download=journal, placée APRÈS authGate : pas de route parallèle non protégée).
+  const downloadUrl = ScriptApp.getService().getUrl() + '?orgId=' + encodeURIComponent(orgId) + '&download=journal';
+  return '<div class="section" id="journal">'
+    + '<div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">'
+    + '<span>◈ Structory — Journal</span>'
+    + '<a href="' + downloadUrl + '" style="font-size:11px;color:#7AAE92;text-decoration:none;">⬇️ Télécharger</a>'
+    + '</div>'
+    + journalHtml + '</div>';
 }
 
 // 3000 30 - getPatrimoine()
@@ -2963,9 +3635,15 @@ function getEvolutionHistory(orgId) {
 
 // 6000 10 - buildDashboard()
 function buildDashboard(org, patrimoine, evolutions, orgId, structoryData, comptesData) {
-  const objects = patrimoine.objects || [];
+  // Orgs SANS comptes patrimoine (ledger-only, ex: Structory/compta_copro) : Objets/Règles
+  // viennent maintenant du vrai journal/des vraies Rule bricks, plus des données de démo
+  // figées (getTestPatrimoine) — retour de Stéphane 2026-08-08 : "que la liste des comptes
+  // soit immédiatement consultable avec le PCG, que les Rules soient compréhensibles en
+  // permanence". Flows/Temps restent la démo fixe pour l'instant, non demandés cette fois.
+  const isSMC = !!comptesData;
+  const objects = isSMC ? [] : getStructoryAccounts(orgId);
   const flows = patrimoine.flows || [];
-  const rules = patrimoine.rules || [];
+  const rules = isSMC ? [] : getStructoryRules(orgId);
   const time = patrimoine.time || [];
 
   const evolutionsCount = evolutions ? evolutions.length : 0;
@@ -2979,38 +3657,21 @@ function buildDashboard(org, patrimoine, evolutions, orgId, structoryData, compt
   const fakeMetricsHtml = comptesData ? '' : `
     <div class="metric">
       <div class="value">${objects.length}</div>
-      <div class="label">📦 Objets</div>
-    </div>
-    <div class="metric">
-      <div class="value">${flows.length}</div>
-      <div class="label">🌊 Flows</div>
+      <div class="label">📦 Comptes PCG</div>
     </div>
     <div class="metric">
       <div class="value">${rules.length}</div>
       <div class="label">⚖️ Règles</div>
     </div>
-    <div class="metric" style="border-color:#FFB300;">
-      <div class="value" style="color:#FFB300;">${evolutionsCount}</div>
-      <div class="label">⚡ Évolutions</div>
-      <div class="suggestion">${suggestions.length} suggestions</div>
-    </div>
   `;
 
   const metricsHtml = `${comptesMetricHtml}${fakeMetricsHtml}`;
 
-  // Une org avec ses propres comptes/soldes réels n'a pas besoin des sections
-  // Objets/Flows/Règles/Temps/Évolutions ci-dessous : 100% des données de démo fixes
-  // (getTestPatrimoine/getTestEvolutionProposals, Storage.* jamais implémenté), pas pertinentes
-  // quand une vraie section Comptes existe. Masquées ici plutôt que montrées comme si elles
-  // étaient réelles — décision du 2026-07-21 (Stéphane : "vitrine pas du tout basée sur du
-  // réel"). Pas encore retirées globalement : à confirmer si d'autres orgs en dépendent.
-  const isSMC = !!comptesData;
-
   // Règle générale (pas spécifique à SMC) : si une org a sa propre section Comptes (plus
-  // riche : liste + cumul + solde réel), la section Structory générique (juste un dump de
-  // balance brut + "aucun journal") devient redondante et ne s'affiche plus — retour de
-  // Stéphane 2026-07-21 ("aucun journal... n'est plus utile ici"). Les orgs sans section
-  // Comptes dédiée gardent la section Structory : c'est leur seul affichage de solde.
+  // riche : liste + cumul + solde réel), la section Structory générique (journal) devient
+  // redondante et ne s'affiche plus — retour de Stéphane 2026-07-21 ("aucun journal... n'est
+  // plus utile ici"). Les orgs sans section Comptes dédiée gardent la section Structory :
+  // c'est leur seul affichage de journal/comptes/rules.
   // Comptes patrimoine remonté en haut de page (juste après le Communicator embed), pas mélangé
   // aux autres sections — retour de Stéphane 2026-07-21 ("la liste des comptes en bas est
   // super du coup je la mettrais en haut").
@@ -3021,11 +3682,10 @@ function buildDashboard(org, patrimoine, evolutions, orgId, structoryData, compt
     sectionsHtml += renderStructorySection(orgId, structoryData || { exists: false });
   }
   if (!isSMC) {
-    sectionsHtml += renderSection('📦 Objets', objects);
-    sectionsHtml += renderSection('🌊 Flows', flows);
-    sectionsHtml += renderSection('⚖️ Règles', rules);
-    sectionsHtml += renderSection('⏱️ Temps', time);
-    sectionsHtml += renderEvolutionSection(evolutions);
+    sectionsHtml += renderObjectsSection(objects);
+    sectionsHtml += renderFlowsSection(orgId);
+    sectionsHtml += renderRulesSection(rules);
+    sectionsHtml += renderTimeSection();
   }
 
   return {

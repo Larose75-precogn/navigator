@@ -1,5 +1,5 @@
 {
-  "timeZone": "Etc/GMT+4",
+  "timeZone": "Etc/UTC",
   "oauthScopes": [
     "https://www.googleapis.com/auth/script.external_request",
     "https://www.googleapis.com/auth/drive",
