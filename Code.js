@@ -80,7 +80,7 @@ const PUBLIC_DEMO_ORG_IDS = ['smcdemo', 'structory_demo'];
 // ================================================================
 // noSessionFallback=true : Navigator tourne en executeAs USER_DEPLOYING, où
 // Session.getActiveUser() renvoie toujours l'identité du déployeur (Stéphane), jamais celle du
-// visiteur réel — sans ce flag, "Connecté en tant que owner@example.com" s'affichait à
+// visiteur réel — sans ce flag, "Connecté en tant que le-deployeur" s'affichait à
 // n'importe quel visiteur anonyme de n'importe quelle org (bug réel, 2026-08-02).
 function identityGetOrgProfile(orgId) { return Bibliotheque.identityGetOrgProfile(orgId, null, true); }
 function identityUpdateOrgProfile(orgId, folderId, fields) { return Bibliotheque.identityUpdateOrgProfile(orgId, folderId, fields); }
@@ -282,6 +282,7 @@ function doGet(e) {
   try {
     // 1. Résoudre le contexte
     const context = resolveContext(e);
+    context.startPlane = (e && e.parameter && ['game','sheet','navigator'].indexOf(e.parameter.plane) !== -1) ? e.parameter.plane : 'game';
     Logger.log('Context: ' + JSON.stringify(context));
 
     // 1bis. Gate d'accès réel (2026-08-08, retour de Stéphane : "construit enfin le chantier
@@ -429,6 +430,7 @@ const ORG_ONBOARDING_URL = "https://script.google.com/macros/s/AKfycbw8hhBqSBl4e
 
 function getLoginScreenHTML(orgId, message) {
   const loginUrl = ORG_ONBOARDING_URL + '?screen=login&orgId=' + encodeURIComponent(orgId);
+  const execUrl = ScriptApp.getService().getUrl() || '';
   return '<!DOCTYPE html><html><head><meta charset="UTF-8">'
     + '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
     + '<title>Structory - Connexion</title>'
@@ -450,7 +452,10 @@ function getLoginScreenHTML(orgId, message) {
     + '<h1>Connexion</h1>'
     + '<div class="sub">"' + _escAttr(orgId) + '" est une organisation réelle — connecte-toi pour y accéder.</div>'
     + (message ? '<div class="msg warn">' + _escAttr(message) + '</div>' : '')
+    + '<a class="btn" id="resumeBtn" target="_top" style="display:none; margin-bottom:10px;">↺ Reprendre ma session</a>'
     + '<a class="btn" href="' + loginUrl + '" target="_top">Se connecter</a>'
+    + '<div class="msg" id="resumeHint" style="display:none; color:#7AAE92; margin-top:10px;">Session trouvée sur cet appareil — reprends sans repasser par l\'email.</div>'
+    + '<script>(function(){try{var EXEC=' + JSON.stringify(execUrl) + ';var OID=' + JSON.stringify(orgId) + ';var t=localStorage.getItem("structory_session");if(t&&EXEC){var u=EXEC+"?orgId="+encodeURIComponent(OID)+"&s="+encodeURIComponent(t);var b=document.getElementById("resumeBtn");b.href=u;b.style.display="block";document.getElementById("resumeHint").style.display="block";try{window.top.location.href=u;}catch(e){}}}catch(e){}})();</scr' + 'ipt>'
     + '</div></body></html>';
 }
 
@@ -539,7 +544,34 @@ function getNavigatorHTML(org, patrimoine, evolutions, context) {
   // script client (toggleAutomatiserMenu et alentours).
   const flowWidgetHtml = Bibliotheque.getFlowWidgetHtml();
   
-  return `
+    // ---- Plan "game" : plan immersif (le vrai game) + bouton discret "plan" (bascule) — larose75 ----
+  var GP_ICON = {
+  navigator: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>',
+  sheet: '<svg width="16" height="16" viewBox="0 0 24 24"><rect x="4" y="2" width="16" height="20" rx="2.5" fill="#22a15b"/><g stroke="#eafff2" stroke-width="1.4" opacity="0.92"><path d="M4 9h16M4 15h16M10 2v20"/></g></svg>',
+  game: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8fc4ee" stroke-width="2" stroke-linecap="round"><path d="M2 9c3-3.4 6-3.4 9 0s6 3.4 9 0"/><path d="M2 15c3-3.4 6-3.4 9 0s6 3.4 9 0"/></svg>',
+  plan: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>'
+};
+var gamePlaneHtml = `<div id="pcg-sheet-plane" style="position:fixed;inset:0;z-index:2147483645;display:none;align-items:center;justify-content:center;background:#0C1E28;color:#9FB4C0;font-family:system-ui,sans-serif;text-align:center"><div><div style="font-size:26px;color:#E9F1F6;margin-bottom:8px">Sheet</div><div>la couche Google Sheet de cette organisation</div><div style="margin-top:12px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#5A7280;border:1px dashed #24424f;padding:4px 12px;border-radius:999px;display:inline-block">work in progress</div></div></div>`
+  + `<div id="pcg-game-plane" style="position:fixed;inset:0;z-index:2147483645;display:none;background:#06121a"><iframe id="pcg-game" src="https://structory.ai/game/?org=${encodeURIComponent(orgId)}&embed=1" style="width:100%;height:100%;border:0;display:block"></iframe></div>`
+  + `<div id="pcg-plan-wrap" style="position:fixed;bottom:16px;z-index:2147483647"></div>`
+  + `<div id="pcg-menu" style="position:fixed;bottom:56px;z-index:2147483647;display:none;background:#0C1E28;border:1px solid rgba(120,160,175,.28);border-radius:11px;padding:6px;min-width:190px;box-shadow:0 10px 34px rgba(0,0,0,.55);font-family:system-ui,sans-serif"></div>`
+  + `<script>(function(){
+      var IC=${JSON.stringify(GP_ICON)}, oid=${JSON.stringify(orgId)};
+      var sp=document.getElementById("pcg-sheet-plane"),gp=document.getElementById("pcg-game-plane"),fr=document.getElementById("pcg-game"),wrap=document.getElementById("pcg-plan-wrap"),menu=document.getElementById("pcg-menu");
+      var PLANES=[{k:"navigator",lbl:"navigator"},{k:"sheet",lbl:"sheet · work in progress"},{k:"game",lbl:"game"}];
+      var cur=${JSON.stringify(context.startPlane)};
+      var BST="opacity:.85;font:600 13px system-ui,sans-serif;color:#B8CBD4;background:rgba(9,20,28,.85);border:1px solid rgba(120,160,175,.4);padding:8px 13px;border-radius:999px;cursor:pointer;display:inline-flex;align-items:center;gap:7px;line-height:0";
+      function place(){var r=(window.innerWidth>900?416:16)+"px";wrap.style.right=r;menu.style.right=r;}
+      function go(w){cur=w;sp.style.display=(w==="sheet")?"flex":"none";gp.style.display=(w==="game")?"block":"none";menu.style.display="none";render();}
+      function buildMenu(){menu.innerHTML="";PLANES.forEach(function(p){if(p.k===cur)return;var d=document.createElement("div");d.style.cssText="padding:9px 12px;border-radius:8px;cursor:pointer;color:#C9D8E0;font-size:13px;display:flex;align-items:center;gap:10px";d.innerHTML=IC[p.k]+"<span>"+p.lbl+"</span>";d.onmouseover=function(){d.style.background="rgba(120,160,175,.13)";};d.onmouseout=function(){d.style.background="none";};d.onclick=function(e){e.stopPropagation();go(p.k);};menu.appendChild(d);});}
+      function toggleMenu(e){e.stopPropagation();buildMenu();menu.style.display=(menu.style.display==="block")?"none":"block";}
+      function render(){wrap.innerHTML="";var b=document.createElement("button");b.style.cssText=BST;if(cur==="navigator"){b.innerHTML="<span>plan</span>";}else{b.innerHTML=IC.plan;b.title="changer de plan";}b.onclick=toggleMenu;wrap.appendChild(b);}
+      document.addEventListener("click",function(){menu.style.display="none";});
+      place();window.addEventListener("resize",place);go(cur);
+      window.addEventListener("message",function(ev){if(ev.data&&ev.data.type==="precogn-game-ready"){google.script.run.withSuccessHandler(function(j){try{fr.contentWindow.postMessage({type:"precogn-journal",journal:j},"*");}catch(e){}}).getGameJournal(oid);}});
+    })();</script>`;
+
+return `
 <!DOCTYPE html>
 <html>
 <head>
@@ -570,7 +602,7 @@ function getNavigatorHTML(org, patrimoine, evolutions, context) {
        Colonne pleine hauteur, pas de resize dynamique par postMessage nécessaire (contrairement
        à l'ancien embed en haut de page, retiré le 2026-07-26) — beaucoup plus simple et fiable. */
     .precogn-split { display: flex; align-items: flex-start; gap: 20px; }
-    .precogn-main { flex: 1 1 auto; min-width: 0; }
+    .precogn-main { flex: 1 1 auto; min-width: 0; position: relative; }
     .precogn-communicator {
       flex: 0 0 380px;
       position: sticky;
@@ -1031,7 +1063,7 @@ ${flowWidgetHtml}
     <span>${new Date().toLocaleString()}</span>
   </div>
 </div>
-</div>
+${gamePlaneHtml}</div>
 ${communicatorColumnHtml}
 </div>
 
@@ -2882,6 +2914,17 @@ ${communicatorColumnHtml}
 }
 
 // 1000 30 - getErrorHTML()
+
+// ---- Plan "game" : journal réel de l'org au format game (appel serveur, clé jamais exposée au client) ----
+function getGameJournal(orgId) {
+  try {
+    var r = UrlFetchApp.fetch('http://213.32.16.118:8080/api/ledger/journal.json?orgId=' + encodeURIComponent(orgId),
+      { headers: { 'X-Service-Key': '***REMOVED_SERVICE_KEY***' }, muteHttpExceptions: true });
+    if (r.getResponseCode() !== 200) return [];
+    return JSON.parse(r.getContentText());
+  } catch (e) { return []; }
+}
+
 function getErrorHTML(error) {
   const msg = typeof error === 'string' ? error : (error.message || 'Erreur inconnue');
   return `
@@ -3782,18 +3825,10 @@ function getModulesMenu(orgId, comptesData) {
   // elles, gardés pour les autres qui les utilisent peut-être.
   const isSMC = !!comptesData;
   const modules = [];
-  if (!isSMC) {
-    modules.push(
-      { id: '4.1.1.1', name: '🔄 Fusion Sheets', url: 'https://script.google.com/macros/library/d/1ZRV2VrVIX4mChvgxbsbgzVRkkljhe8-hxfqdNaRNL1Lnbwa834m9i4Cr/1' },
-      { id: '4.1', name: '📄 SheetToDoc', url: '' },
-      { id: '4.4', name: '📊 ObjectToSheet', url: 'https://script.google.com/macros/s/AKfycbwYw2uwXKmz1aW2MqzTTQKGQ8bxvxhoFIO4AtfzYCxeTwaMcjh72Te0QzabGLka5Eny/exec' }
-    );
-  }
+  // 2026-08-15 (retour de Stephane) : retires du menu Fusion Sheets / SheetToDoc /
+  // ObjectToSheet / LLM PreCogn (outils Sheets generiques + llmprecogn) - non pertinents ici.
   // LlmPrecogn déplacé dans la barre d'outils de la section Comptes pour les orgs V0 (retour
   // de Stéphane : "llmprecogn doit être à côté de 18 comptes") — pas dupliqué ici pour elles.
-  if (!isSMC) {
-    modules.push({ id: '4.002', name: '🧠 LLM PreCogn', url: 'https://precogn-llm-backend.splaissy.workers.dev', cls: 'evolution' });
-  }
   
   let html = '';
   for (const mod of modules) {
@@ -3854,22 +3889,14 @@ function testNavigator() {
 // migrateAllPreCognOrgs → Exécuter
 // ================================================================
 function migrateAllPreCognOrgs() {
-  var OWNER_EMAIL = 'owner@example.com';
-  var OWNER_NAME  = 'Fondateur';
-
-  var orgs = [
-    ['precogn',             'PreCogn',           null,                 '135SXvs9tRRsycS3GaF1svBFiLfjmZZj5'],
-    ['structory',           'Structory',          'precogn',            '1vYWtlIxTzZBB4e29J8ymZSdZQxyVkzqz'],
-    ['compta_copro',        'Compta Copro',       'precogn',            '1ll52W0IaTt9ZBbKd6VQ0334oj7-toxVA'],
-    ['suivre_mes_comptes',  'Suivre Mes Comptes', 'precogn',            '1T0VF9whWccRbMmmVB3rJpmNAjNnFd1nF'],
-    ['smcspl',              'SMC SPL',            'suivre_mes_comptes', '1o0RBjT4MyCDdusgLqdGbvNF7RGglURn2'],
-    ['smcdemo',             'SMC Demo',           'suivre_mes_comptes', '1LMaVj80oQBF7jfpiAyYNaIla3BiI8OuI'],
-    ['miroa',               'Miroa',              'compta_copro',       null],
-    ['miroadev',            'Miroa Dev',          'compta_copro',       null],
-    ['45ponia',             '45Ponia',            'compta_copro',       null],
-    ['structorydemo',       'Structory Demo',     'structory',          null],
-    ['precogndemo',         'PreCogn Demo',       'precogn',            null],
-  ];
+  var props = PropertiesService.getScriptProperties();
+  var OWNER_EMAIL = props.getProperty('MIGRATION_OWNER_EMAIL');
+  var OWNER_NAME  = props.getProperty('MIGRATION_OWNER_NAME');
+  var orgsJson    = props.getProperty('MIGRATION_ORGS_JSON');
+  if (!OWNER_EMAIL || !OWNER_NAME || !orgsJson) {
+    throw new Error('Migration non configuree : definir MIGRATION_OWNER_EMAIL, MIGRATION_OWNER_NAME, MIGRATION_ORGS_JSON (Script Properties).');
+  }
+  var orgs = JSON.parse(orgsJson); // [[orgId, orgName, parentOrgId|null, folderId|null], ...]
 
   var results = [];
   for (var i = 0; i < orgs.length; i++) {
