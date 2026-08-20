@@ -67,7 +67,7 @@ const COMMUNICATOR_URL = "https://script.google.com/macros/s/AKfycbwCCLsBtsZ0kre
 // Seule(s) org(s) volontairement publiques (démo prospect, aucune donnée réelle) — toute
 // autre org exige désormais une vraie session (voir authGate) avant de rendre quoi que ce
 // soit. Ne JAMAIS y ajouter smcspl ou une future org cliente réelle.
-const PUBLIC_DEMO_ORG_IDS = ['smcdemo', 'structory_demo'];
+const PUBLIC_DEMO_ORG_IDS = ['smcdemo', 'structory_demo', 'comptademo', 'jdbdemo'];
 
 // ================================================================
 // MODULE "MON COMPTE" (widget Bibliotheque.AccountPanel, subscriptions_api) — relais requis car
