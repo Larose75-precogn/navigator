@@ -2919,7 +2919,7 @@ ${communicatorColumnHtml}
 function getGameJournal(orgId) {
   try {
     var r = UrlFetchApp.fetch('http://213.32.16.118:8080/api/ledger/journal.json?orgId=' + encodeURIComponent(orgId),
-      { headers: { 'X-Service-Key': '***REMOVED_SERVICE_KEY***' }, muteHttpExceptions: true });
+      { headers: { 'X-Service-Key': (PropertiesService.getScriptProperties().getProperty('STRUCTORY_SERVICE_KEY') || '') }, muteHttpExceptions: true });
     if (r.getResponseCode() !== 200) return [];
     return JSON.parse(r.getContentText());
   } catch (e) { return []; }
